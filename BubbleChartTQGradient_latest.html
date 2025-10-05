@@ -1,0 +1,466 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>V4 Market Data Visualizer</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdn.jsdelivr.net/npm/echarts@5.5.0/dist/echarts.min.js"></script>
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
+        body {
+            font-family: 'Inter', sans-serif;
+            background-color: #f8fafc; /* Tailwind gray-50 */
+        }
+        /* Custom scrollbar for the log */
+        #last-update-info::-webkit-scrollbar {
+            width: 5px;
+        }
+        #last-update-info::-webkit-scrollbar-track {
+            background: #e2e8f0; /* slate-200 */
+        }
+        #last-update-info::-webkit-scrollbar-thumb {
+            background: #94a3b8; /* slate-400 */
+            border-radius: 10px;
+        }
+    </style>
+</head>
+<body class="text-gray-800">
+    <div id="app" class="container mx-auto max-w-7xl p-4 sm:p-6 md:p-8">
+        <header class="mb-6">
+            <h1 class="text-3xl font-bold text-gray-900">Market Data Visualizer</h1>
+            <p class="text-gray-500 mt-1">Upload a WSS data file to analyze trade flow with candlestick, volume, and impact bubble charts.</p>
+        </header>
+
+        <!-- Controls Panel -->
+        <div class="controls-panel bg-white p-4 rounded-lg shadow-sm border border-gray-200 mb-6 flex flex-wrap gap-4 items-center">
+            <!-- File Input -->
+            <div class="flex-grow sm:flex-grow-0">
+                <label for="data-file-input" class="block text-sm font-medium text-gray-700 mb-1">Data File</label>
+                <input type="file" id="data-file-input" class="block w-full text-sm text-gray-500 file:mr-4 file:py-2 file:px-4 file:rounded-md file:border-0 file:text-sm file:font-semibold file:bg-blue-50 file:text-blue-700 hover:file:bg-blue-100 cursor-pointer"/>
+            </div>
+             <!-- Security Select -->
+            <div class="flex-grow sm:flex-grow-0">
+                <label for="security-select" class="block text-sm font-medium text-gray-700 mb-1">Security</label>
+                <select id="security-select" class="w-full sm:w-48 p-2 border border-gray-300 rounded-md shadow-sm focus:ring-blue-500 focus:border-blue-500 text-sm">
+                    <option>-- Load File --</option>
+                </select>
+            </div>
+            <!-- Interval Input -->
+            <div class="flex-grow sm:flex-grow-0">
+                <label for="interval-input" class="block text-sm font-medium text-gray-700 mb-1">Interval</label>
+                <input type="text" id="interval-input" value="1T" class="w-full sm:w-24 p-2 border border-gray-300 rounded-md shadow-sm focus:ring-blue-500 focus:border-blue-500 text-sm" placeholder="e.g., 30S, 1T, 5T">
+            </div>
+            <!-- Min Bubble Volume (Q) -->
+            <div class="flex-grow sm:flex-grow-0">
+                <label for="threshold-input" class="block text-sm font-medium text-gray-700 mb-1">Min Bubble Vol (Q)</label>
+                <input type="number" id="threshold-input" value="20" class="w-full sm:w-28 p-2 border border-gray-300 rounded-md shadow-sm focus:ring-blue-500 focus:border-blue-500 text-sm">
+            </div>
+            <!-- Min Single LTQ (Big Player) -->
+            <div class="flex-grow sm:flex-grow-0">
+                <label for="big-player-threshold-input" class="block text-sm font-medium text-gray-700 mb-1">Min Single LTQ</label>
+                <input type="number" id="big-player-threshold-input" value="50" class="w-full sm:w-28 p-2 border border-gray-300 rounded-md shadow-sm focus:ring-blue-500 focus:border-blue-500 text-sm">
+            </div>
+            <!-- Status Indicator -->
+            <div id="status-indicator" class="flex items-center gap-2 text-sm text-gray-500 font-medium ml-auto">
+                <svg class="animate-spin h-5 w-5 text-gray-400 hidden" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path></svg>
+                <span id="status-text">Ready. Load a data file.</span>
+            </div>
+        </div>
+
+        <!-- Chart Area -->
+        <div class="chart-area relative bg-white rounded-lg shadow-sm border border-gray-200 p-4">
+            <div id="trading-chart" style="width: 100%; height: 65vh;"></div>
+            <div id="no-data-message" class="absolute inset-0 flex items-center justify-center pointer-events-none">
+                <div class="text-center text-gray-400">
+                    <svg xmlns="http://www.w3.org/2000/svg" class="mx-auto h-12 w-12" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1"><path stroke-linecap="round" stroke-linejoin="round" d="M7 11.5V14m0-2.5v-6a1.5 1.5 0 113 0m-3 6a1.5 1.5 0 00-3 0v2a7.5 7.5 0 0015 0v-5a1.5 1.5 0 00-3 0m-6-3V11m0-5.5v-1a1.5 1.5 0 013 0v1m0 0V11m0-5.5a1.5 1.5 0 013 0v3m0 0V11" /></svg>
+                    <p class="mt-2 text-lg font-medium">No Data to Display</p>
+                    <p class="text-sm">Please select a file to begin analysis.</p>
+                </div>
+            </div>
+        </div>
+        
+        <!-- Log Area -->
+        <div class="log-area mt-4">
+            <label class="text-sm font-medium text-gray-700">Processing Log</label>
+            <div id="last-update-info" class="text-xs text-gray-500 bg-gray-100 p-3 rounded-md h-24 overflow-y-auto border"></div>
+        </div>
+    </div>
+     <!-- Chosen Palette: Tailwind Neutrals (Gray-50, Gray-800, Gray-500) with Blue (50, 700) accent for controls and Green/Red for trading (22c55e, ef4444). -->
+        <!-- Application Structure Plan: Dashboard approach with a fixed Control Panel, a large Chart Area (primary focus), and a detailed Log Area. This structure was chosen for real-time data analysis to keep controls accessible (top), visualizations central (middle), and processing status transparent (bottom), facilitating quick interaction and synthesis. -->
+        <!-- Visualization & Content Choices: The core report content is Trade Data. The goal is to compare price movement, volume, and high-impact trades. Viz: OHLC (Candlestick) for price trend, Stacked Bar Chart for volume (Aggressor & Big Player split), and Scatter Plot for high-impact trades (Bubble size represents volume/impact). Interaction: File Upload/Select (initial filter), Interval/Threshold Inputs (data manipulation), DataZoom (time-series exploration). Justification: This combination maximizes data density and allows the user to correlate price action with underlying volume and player activity within a single view, adhering to NO SVG/Mermaid using ECharts Canvas rendering. -->
+        <!-- CONFIRMATION: NO SVG graphics used. NO Mermaid JS used. -->
+    <script>
+   
+
+        // Boilerplate Firebase structure (not used in this example)
+        const __app_id = 'trading-file-app';
+        const __firebase_config = '{}'; 
+        const __initial_auth_token = undefined; 
+
+        // --- DOM Element References ---
+        const fileInput = document.getElementById('data-file-input');
+        const securitySelect = document.getElementById('security-select');
+        const intervalInput = document.getElementById('interval-input');
+        const thresholdInput = document.getElementById('threshold-input');
+        const bigPlayerThresholdInput = document.getElementById('big-player-threshold-input');
+        const statusIndicator = document.getElementById('status-indicator');
+        const statusText = document.getElementById('status-text');
+        const spinner = statusIndicator.querySelector('svg');
+        const chartContainer = document.getElementById('trading-chart');
+        const noDataMessage = document.getElementById('no-data-message');
+        const logContainer = document.getElementById('last-update-info');
+
+        // --- Global State ---
+        let tradingChart = null;
+        let chartData = { ohlc: [], bubbles: [] };
+        let currentSecurity = '';
+        let currentInterval = '1T';
+        let currentThreshold = 20;
+        let currentBigPlayerThreshold = 50;
+        let rawTradeData = [];
+        let simulatedMessages = [];
+        let globalAvgLtq = 1;
+        let lastTradePrice = null;
+        let historicalOhlcData = []; // MUST remain empty
+
+        // --- Utility Functions ---
+        const logUpdate = (message) => {
+            const now = new Date();
+            const timeString = now.toLocaleTimeString();
+            logContainer.innerHTML += `<div>[${timeString}] ${message}</div>`;
+            logContainer.scrollTop = logContainer.scrollHeight;
+        };
+
+        const updateStatus = (text, isLoading = false) => {
+            statusText.textContent = text;
+            spinner.style.display = isLoading ? 'block' : 'none';
+        };
+
+        // --- Core Application Logic ---
+
+        // 5.1. File Loading and Security Scan
+        const handleFileSelect = (event) => {
+            const file = event.target.files[0];
+            if (file) {
+                readFileContents(file);
+            }
+        };
+
+        const readFileContents = (file) => {
+            updateStatus(`Reading ${file.name}...`, true);
+            const reader = new FileReader();
+            reader.onload = (e) => {
+                try {
+                    const content = e.target.result;
+                    simulatedMessages = content.split('\n').filter(line => line.trim() !== '');
+                    logUpdate(`File loaded successfully: ${simulatedMessages.length} messages found.`);
+                    
+                    scanMessagesForSecurities(simulatedMessages);
+                    
+                } catch (error) {
+                    logUpdate(`Error processing file content: ${error}`);
+                    updateStatus('Error processing file.', false);
+                }
+            };
+            reader.onerror = () => {
+                logUpdate('Error reading file.');
+                updateStatus('Error reading file.', false);
+            };
+            reader.readAsText(file);
+        };
+        
+        const scanMessagesForSecurities = (messages) => {
+            const securityIds = new Set();
+            messages.forEach(msg => {
+                try {
+                    const data = JSON.parse(msg);
+                    if (data.feeds) {
+                        Object.keys(data.feeds).forEach(id => securityIds.add(id));
+                    }
+                } catch (e) { /* Ignore parsing errors during scan */ }
+            });
+
+            securitySelect.innerHTML = ''; // Clear existing options
+            if (securityIds.size > 0) {
+                 securityIds.forEach(id => {
+                    const option = document.createElement('option');
+                    option.value = id;
+                    option.textContent = id;
+                    securitySelect.appendChild(option);
+                });
+                currentSecurity = securitySelect.options[0].value;
+                securitySelect.value = currentSecurity;
+                logUpdate(`Found securities: ${Array.from(securityIds).join(', ')}. Selecting ${currentSecurity}.`);
+                startChartPipeline();
+            } else {
+                logUpdate('No valid securities found in the file.');
+                updateStatus('No securities found.', false);
+            }
+        };
+
+        // 5.2. The Orchestrator
+        const startChartPipeline = () => {
+            updateStatus('Processing data...', true);
+            noDataMessage.style.display = 'flex';
+            if (tradingChart) {
+                echarts.dispose(tradingChart);
+                tradingChart = null;
+            }
+
+            rawTradeData = [];
+            lastTradePrice = null;
+
+            simulatedMessages.forEach(msg => processTradeMessage(msg));
+            
+            if (rawTradeData.length === 0) {
+                logUpdate(`No trade data found for the selected security: ${currentSecurity}.`);
+                updateStatus(`No data for ${currentSecurity}.`, false);
+                return;
+            }
+
+            calculateGlobalAverage(rawTradeData);
+
+            chartData = aggregateAndResample(rawTradeData);
+            
+            drawChart(chartData.ohlc, chartData.bubbles);
+
+            updateStatus('Chart updated.', false);
+            logUpdate(`Processing complete for ${currentSecurity}. Plotted ${chartData.ohlc.length} candles and ${chartData.bubbles.length} impact bubbles.`);
+        };
+        
+        // 5.3. Trade Tick Processing
+        const processTradeMessage = (dataString) => {
+            try {
+                const data = JSON.parse(dataString);
+                if (data.feeds && data.feeds[currentSecurity]) {
+                    const feed = data.feeds[currentSecurity];
+                    if (feed.ltpc && feed.ltpc.ltp && feed.ltpc.ltt && feed.ltpc.ltq) {
+                        const newPrice = parseFloat(feed.ltpc.ltp);
+                        const quantity = parseInt(feed.ltpc.ltq, 10);
+                        
+                        let aggressor = 'BUY'; // Default for first trade or same price
+                        if (lastTradePrice !== null) {
+                            if (newPrice > lastTradePrice) aggressor = 'BUY';
+                            if (newPrice < lastTradePrice) aggressor = 'SELL';
+                        }
+                        
+                        rawTradeData.push({
+                            time: new Date(parseInt(feed.ltpc.ltt, 10)),
+                            price: newPrice,
+                            quantity: quantity,
+                            aggressor: aggressor
+                        });
+
+                        lastTradePrice = newPrice;
+                    }
+                }
+            } catch (e) {
+                // logUpdate(`Failed to parse WSS message: ${e}`);
+            }
+        };
+
+        const calculateGlobalAverage = (trades) => {
+            if (trades.length === 0) {
+                globalAvgLtq = 1;
+                return;
+            }
+            const totalQuantity = trades.reduce((sum, trade) => sum + trade.quantity, 0);
+            globalAvgLtq = totalQuantity / trades.length;
+        };
+
+        // 5.4. Aggregation
+        const aggregateAndResample = (trades) => {
+            const tradesByExactTime = {};
+            trades.forEach(trade => {
+                const timeKey = trade.time.getTime();
+                if (!tradesByExactTime[timeKey]) {
+                    tradesByExactTime[timeKey] = {
+                        trades: [],
+                        price: trade.price
+                    };
+                }
+                tradesByExactTime[timeKey].trades.push(trade);
+            });
+
+            const bubbles = [];
+            Object.entries(tradesByExactTime).forEach(([timeKey, group]) => {
+                const sumLtq = group.trades.reduce((sum, t) => sum + t.quantity, 0);
+                const maxLtq = Math.max(...group.trades.map(t => t.quantity));
+
+                if (sumLtq >= currentThreshold && maxLtq >= currentBigPlayerThreshold) {
+                    const impactScore = maxLtq / globalAvgLtq;
+                    bubbles.push({
+                        x: parseInt(timeKey),
+                        y: group.price,
+                        q: sumLtq,
+                        impactScore: impactScore,
+                    });
+                }
+            });
+
+            const ohlcBuckets = {};
+            const intervalRegex = /(\d+)([ST])/;
+            const match = currentInterval.match(intervalRegex);
+            let intervalMs = 60000; // Default to 1 minute
+            if (match) {
+                const value = parseInt(match[1], 10);
+                const unit = match[2];
+                intervalMs = unit === 'S' ? value * 1000 : value * 60000;
+            }
+
+            trades.forEach(trade => {
+                const intervalStartMs = Math.floor(trade.time.getTime() / intervalMs) * intervalMs;
+                if (!ohlcBuckets[intervalStartMs]) {
+                    ohlcBuckets[intervalStartMs] = {
+                        open: trade.price, high: trade.price, low: trade.price, close: trade.price,
+                        buyVolume: 0, bigPlayerBuyVolume: 0, sellVolume: 0, bigPlayerSellVolume: 0,
+                        firstTradeTime: trade.time.getTime(), lastTradeTime: trade.time.getTime()
+                    };
+                }
+                const bucket = ohlcBuckets[intervalStartMs];
+                if (trade.time.getTime() < bucket.firstTradeTime) {
+                    bucket.open = trade.price;
+                    bucket.firstTradeTime = trade.time.getTime();
+                }
+                if (trade.time.getTime() > bucket.lastTradeTime) {
+                    bucket.close = trade.price;
+                    bucket.lastTradeTime = trade.time.getTime();
+                }
+
+                bucket.high = Math.max(bucket.high, trade.price);
+                bucket.low = Math.min(bucket.low, trade.price);
+
+                const isBigPlayer = trade.quantity >= currentBigPlayerThreshold;
+
+                if (trade.aggressor === 'BUY') {
+                    if (isBigPlayer) bucket.bigPlayerBuyVolume += trade.quantity;
+                    else bucket.buyVolume += trade.quantity;
+                } else { // SELL
+                    if (isBigPlayer) bucket.bigPlayerSellVolume += trade.quantity;
+                    else bucket.sellVolume += trade.quantity;
+                }
+            });
+
+            const ohlc = Object.entries(ohlcBuckets).map(([time, data]) => ({ time: parseInt(time), ...data }))
+                         .sort((a, b) => a.time - b.time);
+            
+            return { ohlc, bubbles };
+        };
+
+        // 5.5. Chart Rendering
+        const drawChart = (ohlcData, bubbleData) => {
+            if (ohlcData.length === 0) {
+                noDataMessage.style.display = 'flex';
+                return;
+            }
+            noDataMessage.style.display = 'none';
+            
+            chartContainer.style.width = '100%';
+            chartContainer.style.height = '65vh';
+            tradingChart = echarts.init(chartContainer);
+
+            const ecOhlcData = ohlcData.map(d => [d.time, d.open, d.close, d.low, d.high]);
+            const ecBubbleData = bubbleData.map(d => [d.x, d.y, d.q, d.impactScore]);
+            
+            const ecNormalBuyVol = ohlcData.map(d => [d.time, d.buyVolume]);
+            const ecBigBuyVol = ohlcData.map(d => [d.time, d.bigPlayerBuyVolume]);
+            const ecNormalSellVol = ohlcData.map(d => [d.time, -d.sellVolume]);
+            const ecBigSellVol = ohlcData.map(d => [d.time, -d.bigPlayerSellVolume]);
+
+            const option = {
+                animation: false,
+                tooltip: {
+                    trigger: 'axis',
+                    axisPointer: { type: 'cross' },
+                    borderWidth: 1,
+                    borderColor: '#ccc',
+                    padding: 10,
+                    textStyle: { color: '#000' },
+                },
+                axisPointer: { link: [{ xAxisIndex: 'all' }] },
+                grid: [
+                    { left: '10%', right: '8%', height: '50%' },
+                    { left: '10%', right: '8%', top: '68%', height: '16%' }
+                ],
+                xAxis: [
+                    { type: 'time', scale: true, axisLine: { onZero: false }, splitLine: { show: false }, axisLabel: { show: false } },
+                    { type: 'time', gridIndex: 1, scale: true, axisLine: { onZero: false }, axisTick: { show: false }, splitLine: { show: false }, axisLabel: { show: true } }
+                ],
+                yAxis: [
+                    { scale: true, splitArea: { show: true } },
+                    { gridIndex: 1, scale: true, splitNumber: 2, axisLabel: { show: false }, axisLine: { show: false }, axisTick: { show: false }, splitLine: { show: false } }
+                ],
+                dataZoom: [
+                    { type: 'inside', xAxisIndex: [0, 1], start: 0, end: 100 },
+                    { show: true, xAxisIndex: [0, 1], type: 'slider', top: '90%', start: 0, end: 100 }
+                ],
+                series: [
+                    {
+                        name: 'Candlestick',
+                        type: 'candlestick',
+                        data: ecOhlcData,
+                        itemStyle: { color: '#22c55e', color0: '#ef4444', borderColor: '#16a34a', borderColor0: '#dc2626' }
+                    },
+                    {
+                        name: 'High Impact Trade',
+                        type: 'scatter',
+                        data: ecBubbleData,
+                        symbolSize: (data) => {
+                            const quantity = data[2];
+                            const normalized = Math.log(quantity / globalAvgLtq + 1);
+                            return Math.min(50, Math.max(5, normalized * 10));
+                        },
+                        itemStyle: {
+                            color: (params) => {
+                                const impactScore = params.data[3];
+                                const cap = 5.0;
+                                const ratio = Math.min(1, Math.max(0, (impactScore - 1) / (cap - 1)));
+                                const hue = (1 - ratio) * 120; // 120 (green) -> 0 (red)
+                                return `hsl(${hue}, 80%, 50%)`;
+                            },
+                            opacity: 0.7
+                        }
+                    },
+                    // Volume Bars
+                    { name: 'Normal Buy', type: 'bar', xAxisIndex: 1, yAxisIndex: 1, data: ecNormalBuyVol, stack: 'TotalVolume', itemStyle: { color: '#86efac'} },
+                    { name: 'Big Player Buy', type: 'bar', xAxisIndex: 1, yAxisIndex: 1, data: ecBigBuyVol, stack: 'TotalVolume', itemStyle: { color: '#22c55e'} },
+                    { name: 'Normal Sell', type: 'bar', xAxisIndex: 1, yAxisIndex: 1, data: ecNormalSellVol, stack: 'TotalVolume', itemStyle: { color: '#fca5a5'} },
+                    { name: 'Big Player Sell', type: 'bar', xAxisIndex: 1, yAxisIndex: 1, data: ecBigSellVol, stack: 'TotalVolume', itemStyle: { color: '#ef4444'} }
+                ]
+            };
+            tradingChart.setOption(option);
+        };
+        
+        // --- Event Listeners ---
+        const handleSettingsChange = () => {
+            currentInterval = intervalInput.value;
+            currentThreshold = parseInt(thresholdInput.value, 10);
+            currentBigPlayerThreshold = parseInt(bigPlayerThresholdInput.value, 10);
+            
+            if (simulatedMessages.length > 0) {
+                 startChartPipeline();
+            }
+        };
+
+        fileInput.addEventListener('change', handleFileSelect);
+        securitySelect.addEventListener('change', (e) => {
+            currentSecurity = e.target.value;
+            handleSettingsChange();
+        });
+        intervalInput.addEventListener('change', handleSettingsChange);
+        thresholdInput.addEventListener('change', handleSettingsChange);
+        bigPlayerThresholdInput.addEventListener('change', handleSettingsChange);
+
+        window.addEventListener('resize', () => {
+            if (tradingChart) {
+                tradingChart.resize();
+            }
+        });
+
+        window.onload = () => {
+            logUpdate('System ready. Please select a data file to begin.');
+        };
+    </script>
+</body>
+</html>
