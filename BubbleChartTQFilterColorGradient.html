@@ -1,0 +1,673 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Real-Time Trading Chart</title>
+    <!-- Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- Inter Font -->
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@100..900&display=swap');
+        body { font-family: 'Inter', sans-serif; }
+    </style>
+    
+    <!-- ECharts CDN -->
+    <script src="https://cdn.jsdelivr.net/npm/echarts@5.5.0/dist/echarts.min.js"></script>
+
+</head>
+<body class="bg-gray-50 min-h-screen p-4 sm:p-8">
+
+    <div id="app" class="max-w-7xl mx-auto bg-white shadow-2xl rounded-xl p-4 sm:p-6 lg:p-8">
+        <h1 class="text-3xl font-bold text-gray-800 mb-6 border-b pb-3">
+            V3 Market Data Visualizer (Data Simulation)
+        </h1>
+
+        <!-- Controls Panel -->
+        <div class="flex flex-wrap gap-4 mb-8 p-4 bg-gray-50 rounded-lg shadow-inner">
+            
+            <!-- File Input -->
+            <div class="flex flex-col">
+                <label for="data-file-input" class="text-sm font-medium text-gray-700 mb-1">Load Data File (.txt or .json)</label>
+                <input type="file" id="data-file-input" accept=".txt,.json" class="p-2 border border-gray-300 rounded-lg focus:ring-blue-500 focus:border-blue-500 transition duration-150 text-sm file:mr-4 file:py-1 file:px-4 file:rounded-full file:border-0 file:text-sm file:font-semibold file:bg-blue-50 file:text-blue-700 hover:file:bg-blue-100 cursor-pointer">
+            </div>
+
+            <!-- Security Selector -->
+            <div class="flex flex-col">
+                <label for="security-select" class="text-sm font-medium text-gray-700 mb-1">Security</label>
+                <select id="security-select" class="p-2 border border-gray-300 rounded-lg focus:ring-blue-500 focus:border-blue-500 transition duration-150">
+                    <!-- Options populated by JS -->
+                </select>
+            </div>
+            
+            <!-- Interval Input -->
+            <div class="flex flex-col">
+                <label for="interval-input" class="text-sm font-medium text-gray-700 mb-1">Interval (e.g., 30S, 1T)</label>
+                <input type="text" id="interval-input" value="30S" class="p-2 border border-gray-300 rounded-lg w-24 focus:ring-blue-500 focus:border-blue-500 transition duration-150">
+            </div>
+            
+            <!-- Min Bubble Volume (Q) Input -->
+            <div class="flex flex-col">
+                <label for="threshold-input" class="text-sm font-medium text-gray-700 mb-1">Min Bubble Volume (Q)</label>
+                <input type="number" id="threshold-input" value="20" min="1" class="p-2 border border-gray-300 rounded-lg w-32 focus:ring-blue-500 focus:border-blue-500 transition duration-150">
+            </div>
+
+            <!-- New: Max Trade Q Filter (Big Player) Input -->
+            <div class="flex flex-col">
+                <label for="big-player-threshold-input" class="text-sm font-medium text-gray-700 mb-1">Max Trade Q Filter (Big Player)</label>
+                <input type="number" id="big-player-threshold-input" value="50" min="1" class="p-2 border border-gray-300 rounded-lg w-32 focus:ring-blue-500 focus:border-blue-500 transition duration-150">
+            </div>
+
+            <!-- Status Indicator -->
+            <div class="flex items-end ml-auto">
+                <div id="status-indicator" class="flex items-center p-2 rounded-full text-sm font-semibold transition duration-300 bg-gray-200 text-gray-700">
+                    <div class="w-2 h-2 rounded-full bg-gray-500 mr-2" id="status-dot"></div>
+                    <span id="status-text">Awaiting Data</span>
+                </div>
+            </div>
+        </div>
+
+        <!-- Chart Area -->
+        <div class="relative h-[60vh] bg-gray-100 rounded-lg p-2 shadow-inner">
+            <!-- Changed from canvas to div for ECharts -->
+            <div id="trading-chart" class="w-full h-full"></div> 
+            <div id="no-data-message" class="absolute inset-0 flex items-center justify-center bg-gray-100/90 text-gray-600 font-medium">
+                Select a data file or wait for the default simulation to start.
+            </div>
+        </div>
+
+        <!-- Debug/Live Data Feed -->
+        <div class="mt-6 p-4 bg-yellow-50 rounded-lg text-sm text-gray-700">
+            <p class="font-semibold text-yellow-800 mb-2">Simulation Log:</p>
+            <div id="last-update-info" class="font-mono text-xs overflow-x-auto h-16 overflow-y-scroll bg-white p-2 rounded">
+                System ready. Select a file or refresh to run default data.
+            </div>
+        </div>
+    </div>
+
+    <!-- JavaScript Logic -->
+    <script>
+        // --- Globals & Initial Setup ---
+        let tradingChart = null; // Will now hold the ECharts instance
+        let chartData = { ohlc: [], bubbles: [] };
+        let currentSecurity = 'NSE_FO|35415'; // Default security ID
+        let currentInterval = '30S';
+        let currentThreshold = 20; // Min total aggregated quantity for bubble
+        let currentBigPlayerThreshold = 50; // New: Min single trade quantity (ltq) for bubble
+        let simulationTimeoutId; 
+        
+        let rawTradeData = []; 
+        let simulatedMessages = [];
+
+        // Initial Securities List (used if no file is loaded)
+        let INITIAL_SECURITIES = [
+            'NSE_FO|35415', 'NSE_INDEX|Nifty 50', 'NSE_INDEX|Nifty Bank', 'NSE_FO|35006'
+        ];
+        
+        // --- DEFAULT SIMULATED MARKET DATA (Mock WSS Messages) ---
+        const DEFAULT_SIMULATION_DATA = [
+            '{"feeds":{"NSE_FO|35415":{"ltpc":{"ltp":21500.50,"ltt":1718188800000,"ltq":25}}}}',
+            '{"feeds":{"NSE_FO|35415":{"ltpc":{"ltp":21500.65,"ltt":1718188801000,"ltq":10}}}}',
+            '{"feeds":{"NSE_FO|35415":{"ltpc":{"ltp":21500.70,"ltt":1718188802000,"ltq":35}}}}', 
+            // Aggregation 1: 3 trades (12, 30, 10). Total=52. Avg=17.33. StdDev is high. High CV.
+            '{"feeds":{"NSE_FO|35415":{"ltpc":{"ltp":21500.80,"ltt":1718188803000,"ltq":12}}}}',
+            '{"feeds":{"NSE_FO|35415":{"ltpc":{"ltp":21500.80,"ltt":1718188803000,"ltq":30}}}}',
+            '{"feeds":{"NSE_FO|35415":{"ltpc":{"ltp":21500.80,"ltt":1718188803000,"ltq":10}}}}',
+            '{"feeds":{"NSE_FO|35415":{"ltpc":{"ltp":21500.60,"ltt":1718188804000,"ltq":5}}}}',
+            '{"feeds":{"NSE_FO|35415":{"ltpc":{"ltp":21500.45,"ltt":1718188805000,"ltq":8}}}}',
+            '{"feeds":{"NSE_FO|35415":{"ltpc":{"ltp":21500.30,"ltt":1718188806000,"ltq":15}}}}',
+            '{"feeds":{"NSE_FO|35415":{"ltpc":{"ltp":21500.10,"ltt":1718188807000,"ltq":28}}}}', 
+            // Aggregation 2: 2 trades (10, 22). Total=32. Avg=16. StdDev is low. Low CV.
+            '{"feeds":{"NSE_FO|35415":{"ltpc":{"ltp":21500.25,"ltt":1718188808000,"ltq":10}}}}',
+            '{"feeds":{"NSE_FO|35415":{"ltpc":{"ltp":21500.35,"ltt":1718188809000,"ltq":22}}}}', 
+            // Aggregation 3: 2 trades (60, 10). Total Q=70. Avg=35. StdDev is very high. High CV (HOTTER)
+            '{"feeds":{"NSE_FO|35415":{"ltpc":{"ltp":21500.50,"ltt":1718188810000,"ltq":60}}}}', 
+            '{"feeds":{"NSE_FO|35415":{"ltpc":{"ltp":21500.50,"ltt":1718188810000,"ltq":10}}}}',
+            // Aggregation 4: 2 trades (10, 20). Total Q=30. Avg=15. StdDev is high. High CV.
+            '{"feeds":{"NSE_FO|35415":{"ltpc":{"ltp":21500.60,"ltt":1718188811000,"ltq":10}}}}',
+            '{"feeds":{"NSE_FO|35415":{"ltpc":{"ltp":21500.60,"ltt":1718188811000,"ltq":20}}}}',
+            '{"feeds":{"NSE_FO|35415":{"ltpc":{"ltp":21500.95,"ltt":1718188813000,"ltq":12}}}}',
+            '{"feeds":{"NSE_FO|35415":{"ltpc":{"ltp":21501.00,"ltt":1718188814000,"ltq":30}}}}' 
+        ];
+
+        simulatedMessages = [...DEFAULT_SIMULATION_DATA];
+
+        // --- STATISTICAL HELPER FUNCTION ---
+        /**
+         * Calculates the Standard Deviation of an array of numbers (Sample Std Dev).
+         * @param {number[]} values - The trade quantities (ltq)
+         * @param {number} mean - The average trade quantity
+         * @returns {number} Standard Deviation
+         */
+        function calculateStdDev(values, mean) {
+            // Need at least 2 points for a non-zero sample standard deviation
+            if (values.length < 2) return 0; 
+            
+            // Calculate sum of squared differences from the mean
+            const squareDiffs = values.map(value => {
+                const diff = value - mean;
+                return diff * diff;
+            });
+            
+            // Variance is sum of squared differences divided by (n-1)
+            const variance = squareDiffs.reduce((sum, val) => sum + val, 0) / (values.length - 1);
+            
+            // Standard Deviation is the square root of the variance
+            return Math.sqrt(variance);
+        }
+        
+        // --- UI & Status Helper (No change) ---
+        function updateStatus(state, message = '') {
+            const statusEl = document.getElementById('status-indicator');
+            const dotEl = document.getElementById('status-dot');
+            const textEl = document.getElementById('status-text');
+            const logEl = document.getElementById('last-update-info');
+
+            const time = new Date().toLocaleTimeString();
+            const newLogEntry = `<div>[${time}] ${message}</div>`;
+            const maxLogEntries = 100;
+            const logEntries = logEl.innerHTML.split('<div>').filter(e => e.trim().length > 0);
+            
+            // Prepend new log entry
+            logEl.innerHTML = newLogEntry + logEntries.slice(0, maxLogEntries - 1).map(e => `<div>${e}`).join('');
+
+
+            statusEl.classList.remove('bg-red-100', 'bg-green-100', 'bg-yellow-100', 'bg-gray-200');
+            dotEl.classList.remove('bg-red-500', 'bg-green-500', 'bg-yellow-500', 'bg-gray-500', 'animate-pulse');
+
+            if (state === 'OPEN') {
+                statusEl.classList.add('bg-green-100', 'text-green-700');
+                dotEl.classList.add('bg-green-500', 'animate-pulse');
+                textEl.textContent = 'Data Streaming';
+            } else if (state === 'CONNECTING') {
+                statusEl.classList.add('bg-yellow-100', 'text-yellow-700');
+                dotEl.classList.add('bg-yellow-500', 'animate-pulse');
+                textEl.textContent = 'Loading/Preparing Data...';
+            } else if (state === 'ERROR') {
+                statusEl.classList.add('bg-red-100', 'text-red-700');
+                dotEl.classList.add('bg-red-500');
+                textEl.textContent = 'Error Occurred';
+            } else if (state === 'CLOSED') {
+                statusEl.classList.add('bg-gray-200', 'text-gray-700');
+                dotEl.classList.add('bg-gray-500');
+                textEl.textContent = 'Simulation Complete';
+            }
+        }
+
+        // --- WebSocket Connection SIMULATION ---
+
+        function simulateWebSocket() {
+            if (simulationTimeoutId) {
+                clearTimeout(simulationTimeoutId);
+                simulationTimeoutId = null;
+            }
+            
+            if (tradingChart) {
+                try {
+                     echarts.dispose(tradingChart);
+                } catch(e) {
+                    console.error("Error during chart destruction (ECharts dispose):", e);
+                }
+                tradingChart = null; 
+            }
+
+            if (simulatedMessages.length === 0) {
+                 updateStatus('ERROR', 'No data to simulate. Please load a file or refresh.');
+                 return;
+            }
+
+            updateStatus('CONNECTING', `Starting data stream for ${simulatedMessages.length} trades on ${currentSecurity}.`);
+            
+            rawTradeData = []; // Clear previous trade history
+            drawChart([], []); // Clear chart visuals
+            document.getElementById('no-data-message').classList.remove('hidden');
+
+            let messageIndex = 0;
+            const intervalDuration = 0; 
+
+            function sendNextMessage() {
+                if (messageIndex < simulatedMessages.length) {
+                    const message = simulatedMessages[messageIndex];
+                    handleWSSMessage(message); 
+                    messageIndex++;
+                    
+                    simulationTimeoutId = setTimeout(sendNextMessage, intervalDuration);
+                } else {
+                    updateStatus('CLOSED', `Data stream complete. Total messages processed: ${simulatedMessages.length}`);
+                    
+                    if (rawTradeData.length === 0) {
+                        const securityId = currentSecurity;
+                        updateStatus('ERROR', `0 trades processed for ${securityId}. Check if your file contains data for this security ID.`);
+                        document.getElementById('no-data-message').classList.remove('hidden');
+                    }
+                }
+            }
+
+            setTimeout(() => {
+                updateStatus('OPEN', 'Data stream started.');
+                sendNextMessage();
+            }, 50); 
+        }
+
+        // --- Security Selector Management, File Reading, Data Processing, Aggregation ---
+        
+        function updateSecuritySelector(newSecurityId) {
+            const selectEl = document.getElementById('security-select');
+            
+            selectEl.innerHTML = '';
+            INITIAL_SECURITIES.forEach(sec => {
+                const option = document.createElement('option');
+                option.value = sec;
+                option.textContent = sec;
+                if (sec === newSecurityId) { 
+                    option.selected = true;
+                }
+                selectEl.appendChild(option);
+            });
+            
+            currentSecurity = newSecurityId; 
+        }
+
+        function readFileContents(file) {
+            updateStatus('CONNECTING', `Reading file: ${file.name} (${(file.size / 1024 / 1024).toFixed(2)} MB)...`);
+            
+            const reader = new FileReader();
+
+            reader.onload = (e) => {
+                try {
+                    const content = e.target.result;
+                    let messages = content.split('\n').map(line => line.trim()).filter(line => line.length > 0);
+                    
+                    if (messages.length === 0) {
+                        throw new Error("File contains no valid JSON lines.");
+                    }
+                    
+                    const uniqueSecurities = new Set();
+                    let firstInstrumentId = null;
+
+                    messages.forEach(line => {
+                        try {
+                            const data = JSON.parse(line);
+                            if (data.feeds) {
+                                const ids = Object.keys(data.feeds);
+                                ids.forEach(id => {
+                                    if (id && id.trim() !== '') {
+                                        uniqueSecurities.add(id);
+                                        if (firstInstrumentId === null) {
+                                            firstInstrumentId = id; 
+                                        }
+                                    }
+                                });
+                            }
+                        } catch (e) {
+                            // Ignore parsing errors for malformed lines
+                        }
+                    });
+
+                    if (uniqueSecurities.size === 0) {
+                         throw new Error("File contains no valid trade data or instrument IDs.");
+                    }
+                    
+                    INITIAL_SECURITIES.length = 0; 
+                    uniqueSecurities.forEach(id => INITIAL_SECURITIES.push(id));
+                    INITIAL_SECURITIES.sort();
+                    
+                    const startingSecurity = firstInstrumentId || INITIAL_SECURITIES[0];
+                    
+                    updateSecuritySelector(startingSecurity);
+                    
+                    simulatedMessages = messages;
+                    updateStatus('OPEN', `File loaded successfully: ${simulatedMessages.length} messages found for ${INITIAL_SECURITIES.length} securities.`);
+                    
+                    simulateWebSocket();
+
+                } catch (error) {
+                    console.error("Error processing file content:", error);
+                    updateStatus('ERROR', `Failed to parse file: ${error.message}`);
+                }
+            };
+
+            reader.onerror = (error) => {
+                console.error("FileReader Error:", error);
+                updateStatus('ERROR', `File read error.`);
+            };
+
+            reader.readAsText(file);
+        }
+
+        function handleFileSelect(event) {
+            const file = event.target.files[0];
+            if (file) {
+                readFileContents(file);
+            }
+        }
+
+        function handleWSSMessage(dataString) {
+            try {
+                const data = JSON.parse(dataString);
+                const feeds = data.feeds;
+                const instrument = currentSecurity; 
+
+                if (feeds && feeds[instrument]) {
+                    const ltpc = feeds[instrument].ltpc;
+                    
+                    if (ltpc && ltpc.ltp !== undefined && ltpc.ltt !== undefined && ltpc.ltq !== undefined) {
+                        const newTrade = {
+                            time: new Date(parseInt(ltpc.ltt, 10)),
+                            price: parseFloat(ltpc.ltp),
+                            quantity: parseFloat(ltpc.ltq) 
+                        };
+                        
+                        rawTradeData.push(newTrade);
+                        
+                        // Pass currentThreshold for total Q filtering, but BigPlayerThreshold is used inside aggregateAndResample
+                        const { ohlc, bubbles } = aggregateAndResample(rawTradeData, currentThreshold); 
+                        chartData.ohlc = ohlc;
+                        chartData.bubbles = bubbles;
+
+                        drawChart(chartData.ohlc, chartData.bubbles);
+                        
+                        document.getElementById('no-data-message').classList.add('hidden');
+                    }
+                }
+            } catch (e) {
+                console.warn("Error processing WSS message:", e, dataString.substring(0, 100));
+            }
+        }
+
+        /**
+         * Aggregates trade data into OHLC candles and high-quantity bubbles.
+         * Calculates Coefficient of Variation (CV) for dynamic color visualization.
+         */
+        function aggregateAndResample(trades, threshold) {
+            if (trades.length === 0) return { ohlc: [], bubbles: [] };
+
+            // 1. Group by Exact Timestamp (for bubble logic)
+            const exactAggregates = new Map(); 
+            
+            trades.forEach(trade => {
+                const ts = trade.time.getTime(); 
+                const ltq = trade.quantity; 
+
+                if (!exactAggregates.has(ts)) {
+                    exactAggregates.set(ts, { price: 0, sumLtq: 0, countLtq: 0, time: trade.time, ltqs: [] });
+                }
+                const agg = exactAggregates.get(ts);
+                
+                // Update stats for the timestamp
+                agg.sumLtq += ltq; 
+                agg.countLtq += 1;
+                agg.ltqs.push(ltq); // Store the trade quantity for Std Dev calculation
+                agg.price = trade.price; 
+            });
+
+            // Filter for high-quantity bubbles and calculate final metrics
+            const bigPlayerQ = currentBigPlayerThreshold; 
+            
+            const bubbles = Array.from(exactAggregates.values())
+                .filter(agg => {
+                    const maxLtq = Math.max(...agg.ltqs);
+                    // Condition 1: Total volume must exceed the main threshold
+                    // Condition 2: At least one trade must exceed the Big Player threshold
+                    return agg.sumLtq >= threshold && maxLtq >= bigPlayerQ;
+                })
+                .map(agg => {
+                    const avgLtq = agg.sumLtq / agg.countLtq;
+                    
+                    // Calculate Standard Deviation of the trade quantities
+                    const stdDev = calculateStdDev(agg.ltqs, avgLtq);
+                    
+                    // Coefficient of Variation (CV): StdDev / Mean. Higher CV = higher concentration.
+                    const cvRatio = avgLtq > 0 ? stdDev / avgLtq : 0; 
+                    
+                    return {
+                        x: agg.time.getTime(), 
+                        y: agg.price,
+                        q: agg.sumLtq, // Total Quantity (for size)
+                        cvRatio: cvRatio // New: Coefficient of Variation (for color)
+                    };
+                });
+
+
+            // 2. Resample to Candlesticks (OHLCV) - unchanged
+            let interval = currentInterval;
+            let intervalMs = 0;
+            if (interval.endsWith('S')) {
+                intervalMs = parseInt(interval) * 1000;
+            } else if (interval.endsWith('T')) { 
+                intervalMs = parseInt(interval) * 60000;
+            } else {
+                intervalMs = 30000; // Default to 30s
+            }
+
+            const ohlcMap = new Map(); 
+            
+            trades.forEach(trade => {
+                const timeMs = trade.time.getTime();
+                const intervalStartMs = Math.floor(timeMs / intervalMs) * intervalMs;
+                
+                if (!ohlcMap.has(intervalStartMs)) {
+                    ohlcMap.set(intervalStartMs, {
+                        x: intervalStartMs,
+                        open: trade.price,
+                        high: trade.price,
+                        low: trade.price,
+                        close: trade.price,
+                        volume: 0
+                    });
+                }
+                
+                const candle = ohlcMap.get(intervalStartMs);
+                candle.high = Math.max(candle.high, trade.price);
+                candle.low = Math.min(candle.low, trade.price);
+                candle.close = trade.price; 
+                candle.volume += trade.quantity;
+            });
+            
+            const ohlc = Array.from(ohlcMap.values()).sort((a, b) => a.x - b.x);
+
+            return { ohlc, bubbles };
+        }
+
+
+        // --- Charting Logic ---
+
+        function drawChart(ohlcData, bubbleData) {
+            const chartDom = document.getElementById('trading-chart');
+            
+            if (ohlcData.length === 0) {
+                 document.getElementById('no-data-message').classList.remove('hidden');
+            } else {
+                 document.getElementById('no-data-message').classList.add('hidden');
+            }
+
+            if (!tradingChart) {
+                tradingChart = echarts.init(chartDom, 'light', { renderer: 'canvas' });
+            }
+
+            // ECharts OHLC data requires [timestamp, open, close, low, high]
+            const ecOhlcData = ohlcData.map(d => [
+                d.x, 
+                d.open,
+                d.close,
+                d.low,
+                d.high
+            ]);
+
+            // 1. Calculate statistics for normalization
+            const allQuantities = bubbleData.map(d => d.q);
+            const allRatios = bubbleData.map(d => d.cvRatio); // Now using CV Ratio
+
+            const avgQ = allQuantities.length > 0 ? allQuantities.reduce((a, b) => a + b, 0) / allQuantities.length : 1;
+            
+            // Note: CV can exceed 1, but we use a fixed cap for visualization stability.
+            const maxCvVisualization = 1.5; 
+            const minCv = allRatios.length > 0 ? Math.min(...allRatios) : 0; 
+            const ratioRange = maxCvVisualization - minCv; 
+
+            // 2. Data transformation for ECharts Scatter: [time, price, total_q, cv_ratio]
+            const ecBubbleData = bubbleData.map(d => [
+                d.x, 
+                d.y,
+                d.q, 
+                d.cvRatio // Coefficient of Variation
+            ]);
+
+            // 3. Size function: scales by total Q relative to the average Q (using log for better distribution)
+            function getSymbolSize(data) {
+                const rawQuantity = data[2]; // total_q
+                const normalizedQ = rawQuantity / avgQ; 
+                // Scale: Min 8, Max 60. 
+                return Math.max(8, Math.min(60, 15 * Math.log10(normalizedQ + 1))); 
+            }
+
+            // 4. Color function: maps cvRatio to a color gradient (Green -> Red)
+            function getColor(ratio) {
+                // Normalize ratio (0 to 1) based on the visualization cap (1.5)
+                let normalized = (ratio - minCv) / ratioRange;
+                normalized = Math.min(1, Math.max(0, normalized)); // Clamp between 0 and 1
+
+                // HSL Gradient: 120 (Green, low CV/uniform) to 0 (Red, high CV/concentrated)
+                const hue = 120 - (normalized * 120); 
+                return `hsl(${hue}, 80%, 45%)`; 
+            }
+            
+            const option = {
+                title: {
+                    text: `${currentSecurity} Candlestick Chart (${currentInterval})`,
+                    left: 'center',
+                    textStyle: { fontSize: 16 }
+                },
+                tooltip: {
+                    trigger: 'axis',
+                    axisPointer: { type: 'cross' },
+                    formatter: function (params) {
+                        let html = params[0].name + '<br/>';
+                        params.forEach(item => {
+                            if (item.seriesType === 'candlestick') {
+                                html += `<span style="display:inline-block;margin-right:4px;border-radius:10px;width:10px;height:10px;background-color:${item.color};"></span>
+                                    OHLC: O:${item.data[1].toFixed(2)} C:${item.data[2].toFixed(2)} L:${item.data[3].toFixed(2)} H:${item.data[4].toFixed(2)}<br/>`;
+                            } else if (item.seriesType === 'scatter') {
+                                const data = item.data;
+                                const ratio = data[3]; // This is now CV Ratio
+                                const totalQ = data[2].toFixed(0);
+                                const color = getColor(ratio);
+
+                                html += `<span style="display:inline-block;margin-right:4px;border-radius:10px;width:10px;height:10px;background-color:${color};"></span>
+                                    <strong>Bubble:</strong> Price: ${data[1].toFixed(2)}<br/>`;
+                                html += `Total Volume (Q): <strong>${totalQ}</strong> (Size based on Total Q)<br/>`;
+                                html += `Coefficient of Variation (Std Dev / Mean): <strong style="color:${color};">${ratio.toFixed(2)}</strong> (Color based on Std Dev concentration)`;
+                            }
+                        });
+                        return html;
+                    }
+                },
+                grid: {
+                    left: '10%',
+                    right: '10%',
+                    bottom: '15%'
+                },
+                xAxis: {
+                    type: 'time',
+                    scale: true,
+                    axisLine: { lineStyle: { color: '#333' } },
+                    splitLine: { show: true, lineStyle: { color: 'rgba(0,0,0,0.05)' } }
+                },
+                yAxis: {
+                    scale: true,
+                    axisLine: { lineStyle: { color: '#333' } },
+                    splitLine: { lineStyle: { color: 'rgba(0,0,0,0.1)' } }
+                },
+                series: [
+                    {
+                        name: 'Price (Candlestick)',
+                        type: 'candlestick',
+                        data: ecOhlcData,
+                        itemStyle: {
+                            color: 'rgb(24, 199, 137)', 
+                            color0: 'rgb(234, 74, 90)', 
+                            borderColor: 'rgb(24, 199, 137)',
+                            borderColor0: 'rgb(234, 74, 90)'
+                        },
+                    },
+                    {
+                        name: `Big Q Filtered Trades (Total Q >= ${currentThreshold}, MaxLTQ >= ${currentBigPlayerThreshold})`,
+                        type: 'scatter',
+                        data: ecBubbleData,
+                        symbolSize: getSymbolSize, // Dynamic size based on Total Q
+                        itemStyle: {
+                            color: function (params) {
+                                const ratio = params.data[3]; // Coefficient of Variation (CV)
+                                return getColor(ratio); // Dynamic color based on CV (Green -> Red)
+                            },
+                            borderColor: 'rgba(0, 0, 0, 0.5)', 
+                            borderWidth: 1.5,
+                            opacity: 0.8
+                        },
+                        tooltip: { formatter: ' ' } // Use parent tooltip
+                    }
+                ]
+            };
+            
+            tradingChart.setOption(option, { notMerge: true });
+        }
+        
+        // --- Main Controller ---
+        
+        function handleAggregationChange() {
+            const newInterval = document.getElementById('interval-input').value.toUpperCase();
+            const newThreshold = parseInt(document.getElementById('threshold-input').value);
+            const newBigPlayerThreshold = parseInt(document.getElementById('big-player-threshold-input').value); 
+
+            currentInterval = newInterval;
+            currentThreshold = newThreshold;
+            currentBigPlayerThreshold = newBigPlayerThreshold; 
+
+            const { ohlc, bubbles } = aggregateAndResample(rawTradeData, currentThreshold); 
+            chartData.ohlc = ohlc;
+            chartData.bubbles = bubbles;
+            
+            drawChart(chartData.ohlc, chartData.bubbles);
+            console.log(`Aggregation settings updated: Interval=${currentInterval}, Total Q Threshold=${currentThreshold}, Big Player Q Threshold=${currentBigPlayerThreshold}`);
+        }
+
+        function handleSecurityChange() {
+             const newSecurity = document.getElementById('security-select').value;
+             if (newSecurity !== currentSecurity) {
+                currentSecurity = newSecurity;
+                simulateWebSocket();
+                console.log(`Security changed to: ${currentSecurity}. Restarting data stream.`);
+             }
+        }
+
+        function setupUI() {
+            currentBigPlayerThreshold = parseInt(document.getElementById('big-player-threshold-input').value);
+            updateSecuritySelector(currentSecurity);
+
+            document.getElementById('security-select').addEventListener('change', handleSecurityChange);
+            document.getElementById('interval-input').addEventListener('change', handleAggregationChange);
+            document.getElementById('threshold-input').addEventListener('change', handleAggregationChange);
+            document.getElementById('big-player-threshold-input').addEventListener('change', handleAggregationChange); 
+            document.getElementById('data-file-input').addEventListener('change', handleFileSelect);
+
+            window.addEventListener('resize', () => {
+                if (tradingChart) {
+                    tradingChart.resize();
+                }
+            });
+        }
+
+        // --- Initialization ---
+        window.onload = () => {
+            setupUI();
+            simulateWebSocket();
+            console.log("App initialized. ECharts loaded. WebSocket data simulation started with default data.");
+        };
+
+        // Boilerplate Firebase structure
+        const __app_id = 'trading-app';
+        const __firebase_config = '{}'; 
+        const __initial_auth_token = undefined; 
+    </script>
+</body>
+</html>

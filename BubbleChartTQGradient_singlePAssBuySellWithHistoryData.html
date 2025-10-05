@@ -1,0 +1,774 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Real-Time Trading Chart with File Input</title>
+    <!-- Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- Inter Font -->
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@100..900&display=swap');
+        body { font-family: 'Inter', sans-serif; }
+    </style>
+    
+    <!-- ECharts CDN -->
+    <script src="https://cdn.jsdelivr.net/npm/echarts@5.5.0/dist/echarts.min.js"></script>
+
+</head>
+<body class="bg-gray-50 min-h-screen p-4 sm:p-8">
+
+    <div id="app" class="max-w-7xl mx-auto bg-white shadow-2xl rounded-xl p-4 sm:p-6 lg:p-8">
+        <h1 class="text-3xl font-bold text-gray-800 mb-6 border-b pb-3">
+            V4 Market Data Visualizer (File Ticks Only)
+        </h1>
+
+        <!-- Controls Panel -->
+        <div class="flex flex-wrap gap-4 mb-8 p-4 bg-gray-50 rounded-lg shadow-inner">
+            
+            <!-- File Input (Now for Live Ticks) -->
+            <div class="flex flex-col">
+                <label for="data-file-input" class="text-sm font-medium text-gray-700 mb-1">Load Live Ticks File (.txt or .json)</label>
+                <input type="file" id="data-file-input" accept=".txt,.json" class="p-2 border border-gray-300 rounded-lg focus:ring-blue-500 focus:border-blue-500 transition duration-150 text-sm file:mr-4 file:py-1 file:px-4 file:rounded-full file:border-0 file:text-sm file:font-semibold file:bg-blue-50 file:text-blue-700 hover:file:bg-blue-100 cursor-pointer">
+            </div>
+
+            <!-- Security Selector -->
+            <div class="flex flex-col">
+                <label for="security-select" class="text-sm font-medium text-gray-700 mb-1">Security</label>
+                <select id="security-select" class="p-2 border border-gray-300 rounded-lg focus:ring-blue-500 focus:border-blue-500 transition duration-150">
+                    <option value="" disabled selected>Load file first</option>
+                </select>
+            </div>
+            
+            <!-- Interval Input -->
+            <div class="flex flex-col">
+                <label for="interval-input" class="text-sm font-medium text-gray-700 mb-1">Live Interval (e.g., 30S, 1T)</label>
+                <input type="text" id="interval-input" value="30S" class="p-2 border border-gray-300 rounded-lg w-24 focus:ring-blue-500 focus:border-blue-500 transition duration-150">
+            </div>
+            
+            <!-- Min Bubble Volume (Q) Input -->
+            <div class="flex flex-col">
+                <label for="threshold-input" class="text-sm font-medium text-gray-700 mb-1">Min Total Bubble Volume (Q)</label>
+                <input type="number" id="threshold-input" value="20" min="1" class="p-2 border border-gray-300 rounded-lg w-32 focus:ring-blue-500 focus:border-blue-500 transition duration-150">
+            </div>
+
+            <!-- Min Single LTQ (Big Player) Input -->
+            <div class="flex flex-col">
+                <label for="big-player-threshold-input" class="text-sm font-medium text-gray-700 mb-1">Min Single LTQ</label>
+                <input type="number" id="big-player-threshold-input" value="50" min="1" class="p-2 border border-gray-300 rounded-lg w-32 focus:ring-blue-500 focus:border-blue-500 transition duration-150">
+            </div>
+
+            <!-- Status Indicator -->
+            <div class="flex items-end ml-auto">
+                <div id="status-indicator" class="flex items-center p-2 rounded-full text-sm font-semibold transition duration-300 bg-gray-200 text-gray-700">
+                    <div class="w-2 h-2 rounded-full bg-gray-500 mr-2" id="status-dot"></div>
+                    <span id="status-text">Awaiting File Load</span>
+                </div>
+            </div>
+        </div>
+
+        <!-- Chart Area -->
+        <div class="relative h-[65vh] bg-gray-100 rounded-lg p-2 shadow-inner">
+            <div id="trading-chart" class="w-full h-full"></div> 
+            <div id="no-data-message" class="absolute inset-0 flex items-center justify-center bg-gray-100/90 text-gray-600 font-medium">
+                Please upload a `.txt` or `.json` file containing WSS trade messages to begin plotting.
+            </div>
+        </div>
+
+        <!-- Debug/Live Data Feed -->
+        <div class="mt-6 p-4 bg-yellow-50 rounded-lg text-sm text-gray-700">
+            <p class="font-semibold text-yellow-800 mb-2">Simulation Log:</p>
+            <div id="last-update-info" class="font-mono text-xs overflow-x-auto h-16 overflow-y-scroll bg-white p-2 rounded">
+                System ready. Waiting for file input.
+            </div>
+        </div>
+    </div>
+
+    <!-- JavaScript Logic -->
+    <script>
+        // --- Globals & Initial Setup ---
+        let tradingChart = null; 
+        let chartData = { ohlc: [], bubbles: [] };
+        let currentSecurity = ''; 
+        let currentInterval = '30S';
+        let currentThreshold = 20; 
+        let currentBigPlayerThreshold = 50; 
+        
+        let rawTradeData = []; // Live ticks data (parsed from file)
+        let simulatedMessages = []; // Raw lines from the file
+        let globalAvgLtq = 1; 
+        let lastTradePrice = null; 
+        
+        // This is now always empty, as we only load data from the file.
+        let historicalOhlcData = []; 
+
+        let INITIAL_SECURITIES = []; 
+        
+        // --- UTILITY FUNCTIONS ---
+        
+        function scanMessagesForSecurities(messages) {
+            const uniqueSecurities = new Set();
+            let firstInstrumentId = null;
+
+            messages.forEach(line => {
+                try {
+                    const data = JSON.parse(line);
+                    if (data.feeds) {
+                        const ids = Object.keys(data.feeds);
+                        ids.forEach(id => {
+                            if (id && id.trim() !== '') {
+                                uniqueSecurities.add(id);
+                                if (firstInstrumentId === null) {
+                                    firstInstrumentId = id; 
+                                }
+                            }
+                        });
+                    }
+                } catch (e) {
+                    // Ignore parsing errors for malformed lines
+                }
+            });
+
+            return { 
+                securities: Array.from(uniqueSecurities).sort(), 
+                firstId: firstInstrumentId 
+            };
+        }
+
+        function calculateGlobalAverage(trades) {
+            if (trades.length === 0) return 1;
+            const totalQ = trades.reduce((sum, trade) => sum + trade.quantity, 0);
+            return totalQ / trades.length;
+        }
+
+        // --- UI & Status Helper ---
+        function updateStatus(state, message = '') {
+            const statusEl = document.getElementById('status-indicator');
+            const dotEl = document.getElementById('status-dot');
+            const textEl = document.getElementById('status-text');
+            const logEl = document.getElementById('last-update-info');
+
+            const time = new Date().toLocaleTimeString();
+            const newLogEntry = `<div>[${time}] ${message}</div>`;
+            const maxLogEntries = 100;
+            const logEntries = logEl.innerHTML.split('<div>').filter(e => e.trim().length > 0);
+            
+            // Add new log entry to the top and truncate if too long
+            logEl.innerHTML = newLogEntry + logEntries.slice(0, maxLogEntries - 1).map(e => `<div>${e}`).join('');
+
+
+            statusEl.classList.remove('bg-red-100', 'bg-green-100', 'bg-yellow-100', 'bg-gray-200');
+            dotEl.classList.remove('bg-red-500', 'bg-green-500', 'bg-yellow-500', 'bg-gray-500', 'animate-pulse');
+
+            if (state === 'LOADING' || state === 'CONNECTING') {
+                statusEl.classList.add('bg-yellow-100', 'text-yellow-700');
+                dotEl.classList.add('bg-yellow-500', 'animate-pulse');
+                textEl.textContent = 'Processing Data...';
+            } else if (state === 'COMPLETE') {
+                statusEl.classList.add('bg-green-100', 'text-green-700');
+                dotEl.classList.add('bg-green-500');
+                textEl.textContent = 'Data Processed';
+            } else if (state === 'ERROR') {
+                statusEl.classList.add('bg-red-100', 'text-red-700');
+                dotEl.classList.add('bg-red-500');
+                textEl.textContent = 'Error Occurred';
+            }
+        }
+
+        // --- Core Synchronous Data Processing ---
+
+        function startChartPipeline() {
+            if (currentSecurity === '' || simulatedMessages.length === 0) {
+                document.getElementById('no-data-message').classList.remove('hidden');
+                updateStatus('LOADING', `Waiting for a file to be loaded.`);
+                drawChart([], []);
+                return;
+            }
+
+            updateStatus('CONNECTING', `Starting chart pipeline for ${currentSecurity}.`);
+            
+            // Dispose of chart to prevent merging old options/data
+            if (tradingChart) {
+                try { echarts.dispose(tradingChart); } catch(e) { console.error("Error during chart destruction:", e); }
+                tradingChart = null; 
+            }
+
+            // --- 1. Reset and Process Live Ticks from File ---
+            rawTradeData = []; // Clear previous data
+            lastTradePrice = null; // IMPORTANT: Reset price tracking for new run
+
+            // Process all messages to populate rawTradeData array
+            simulatedMessages.forEach(message => {
+                // This function stores the raw trade data and updates lastTradePrice sequentially
+                // The aggressor logic handles the first trade by assuming 'BUY' when lastTradePrice is null.
+                processTradeMessage(message); 
+            });
+            
+            if (rawTradeData.length === 0) {
+                 updateStatus('ERROR', `No trade data found for security: ${currentSecurity}`);
+                 drawChart([], []);
+                 return;
+            }
+
+            // --- 2. Calculate global average LTQ based on the filtered live tick data ---
+            globalAvgLtq = calculateGlobalAverage(rawTradeData);
+            updateStatus('CONNECTING', `Trade Ticks loaded: ${rawTradeData.length}. Avg LTQ: ${globalAvgLtq.toFixed(2)}`);
+
+
+            // --- 3. Aggregate Live Ticks (The only data source) ---
+            const liveAggregates = aggregateAndResample(rawTradeData, currentThreshold);
+            chartData.ohlc = liveAggregates.ohlc;
+            chartData.bubbles = liveAggregates.bubbles;
+
+            // --- 4. Draw the chart ---
+            if (chartData.ohlc.length > 0) {
+                document.getElementById('no-data-message').classList.add('hidden');
+                drawChart(chartData.ohlc, chartData.bubbles);
+                updateStatus('COMPLETE', `Processing complete. ${chartData.ohlc.length} aggregated bars loaded from file data.`);
+            } else {
+                updateStatus('ERROR', `0 aggregated bars created from ${rawTradeData.length} ticks.`);
+                drawChart([], []);
+            }
+        }
+
+        /**
+         * Extracts trade data from a single WSS message, determines aggressor proxy, and stores it.
+         */
+        function processTradeMessage(dataString) {
+            try {
+                const data = JSON.parse(dataString);
+                const feeds = data.feeds;
+                const instrument = currentSecurity; 
+
+                if (feeds && feeds[instrument]) {
+                    const ltpc = feeds[instrument].ltpc;
+                    
+                    if (ltpc && ltpc.ltp !== undefined && ltpc.ltt !== undefined && ltpc.ltq !== undefined) {
+                        const newPrice = parseFloat(ltpc.ltp);
+                        const ltq = parseFloat(ltpc.ltq);
+
+                        // Determine aggressor based on uptick/downtick proxy
+                        let aggressor = 'UNKNOWN';
+                        if (lastTradePrice !== null) {
+                            if (newPrice > lastTradePrice) {
+                                aggressor = 'BUY'; // Uptick
+                            } else if (newPrice < lastTradePrice) {
+                                aggressor = 'SELL'; // Downtick
+                            } else {
+                                // For same price, assume continuation of trend or 'BUY' by default 
+                                aggressor = 'BUY';
+                            }
+                        } else {
+                            // First trade in the session (file), assume 'BUY'
+                            aggressor = 'BUY'; 
+                        }
+                        
+                        const newTrade = {
+                            time: new Date(parseInt(ltpc.ltt, 10)),
+                            price: newPrice,
+                            quantity: ltq,
+                            aggressor: aggressor 
+                        };
+                        
+                        rawTradeData.push(newTrade);
+                        lastTradePrice = newPrice; // Update for the next trade
+                    }
+                }
+            } catch (e) {
+                // Ignore silent errors for malformed messages
+            }
+        }
+
+        // --- Data Loading & Aggregation ---
+
+        function updateSecuritySelector(securities, selectedSecurityId) {
+            const selectEl = document.getElementById('security-select');
+            selectEl.innerHTML = '';
+            INITIAL_SECURITIES = securities;
+            
+            if (securities.length === 0) {
+                selectEl.innerHTML = '<option value="" disabled selected>No Securities Found</option>';
+                currentSecurity = '';
+                return;
+            }
+
+            securities.forEach(sec => {
+                const option = document.createElement('option');
+                option.value = sec;
+                option.textContent = sec;
+                if (sec === selectedSecurityId) { 
+                    option.selected = true;
+                }
+                selectEl.appendChild(option);
+            });
+            currentSecurity = selectedSecurityId; 
+        }
+
+        function readFileContents(file) {
+            updateStatus('LOADING', `Reading file: ${file.name}...`);
+            document.getElementById('no-data-message').classList.add('hidden');
+            const reader = new FileReader();
+
+            reader.onload = (e) => {
+                try {
+                    const content = e.target.result;
+                    let messages = content.split('\n').map(line => line.trim()).filter(line => line.length > 0);
+                    
+                    if (messages.length === 0) {
+                        throw new Error("File contains no valid JSON lines.");
+                    }
+                    
+                    const { securities, firstId } = scanMessagesForSecurities(messages);
+
+                    if (securities.length === 0) {
+                         throw new Error("File contains no valid trade data or instrument IDs.");
+                    }
+                    
+                    simulatedMessages = messages; // Store all live tick messages globally
+                    
+                    // Update selector and trigger full reprocessing for the new data
+                    updateSecuritySelector(securities, firstId);
+                    updateStatus('LOADING', `File loaded successfully. Found ${securities.length} securities.`);
+                    startChartPipeline();
+
+                } catch (error) {
+                    console.error("Error processing file content:", error);
+                    updateStatus('ERROR', `Failed to parse file: ${error.message}`);
+                }
+            };
+            reader.readAsText(file);
+        }
+
+        function handleFileSelect(event) {
+            const file = event.target.files[0];
+            if (file) {
+                readFileContents(file);
+            }
+        }
+
+        /**
+         * Aggregates LIVE trade data into new OHLC candles and high-impact bubbles.
+         */
+        function aggregateAndResample(trades, threshold) {
+            if (trades.length === 0) return { ohlc: [], bubbles: [] };
+
+            const bigPlayerQ = currentBigPlayerThreshold; 
+
+            // 1. Group by Exact Timestamp (for bubble logic)
+            const exactAggregates = new Map(); 
+            
+            trades.forEach(trade => {
+                const ts = trade.time.getTime(); 
+                const ltq = trade.quantity; 
+
+                if (!exactAggregates.has(ts)) {
+                    exactAggregates.set(ts, { price: trade.price, sumLtq: 0, countLtq: 0, time: trade.time, maxLtq: 0 });
+                }
+                const agg = exactAggregates.get(ts);
+                
+                // Update stats for the timestamp
+                agg.sumLtq += ltq; 
+                agg.countLtq += 1;
+                agg.maxLtq = Math.max(agg.maxLtq, ltq); 
+                agg.price = trade.price; 
+            });
+
+            // Filter for high-impact bubbles and calculate the Impact Score
+            const bubbles = Array.from(exactAggregates.values())
+                .filter(agg => {
+                    return agg.sumLtq >= threshold && agg.maxLtq >= bigPlayerQ;
+                })
+                .map(agg => {
+                    // Calculate impact based on the single largest trade (maxLtq) against the overall average
+                    const impactScore = globalAvgLtq > 0 ? agg.maxLtq / globalAvgLtq : 0; 
+                    
+                    return { x: agg.time.getTime(), y: agg.price, q: agg.sumLtq, impactScore: impactScore };
+                });
+
+
+            // 2. Resample to Candlesticks (OHLCV)
+            let intervalMs = currentInterval.toUpperCase().endsWith('S') 
+                ? parseInt(currentInterval) * 1000 
+                : currentInterval.toUpperCase().endsWith('T') 
+                ? parseInt(currentInterval) * 60000
+                : 30000; // Default to 30 seconds if interval is malformed
+
+            const ohlcMap = new Map(); 
+            
+            trades.forEach(trade => {
+                const timeMs = trade.time.getTime();
+                // Determine the start time of the aggregation interval
+                const intervalStartMs = Math.floor(timeMs / intervalMs) * intervalMs;
+                
+                if (!ohlcMap.has(intervalStartMs)) {
+                    ohlcMap.set(intervalStartMs, {
+                        x: intervalStartMs,
+                        open: trade.price,
+                        high: trade.price,
+                        low: trade.price,
+                        close: trade.price,
+                        volume: 0,
+                        buyVolume: 0,          
+                        sellVolume: 0,         
+                        bigPlayerBuyVolume: 0, 
+                        bigPlayerSellVolume: 0 
+                    });
+                }
+                
+                const candle = ohlcMap.get(intervalStartMs);
+                candle.high = Math.max(candle.high, trade.price);
+                candle.low = Math.min(candle.low, trade.price);
+                candle.close = trade.price; 
+                
+                // Track volume based on aggressor proxy
+                const isBigPlayer = trade.quantity >= bigPlayerQ;
+                
+                if (trade.aggressor === 'BUY' || trade.aggressor === 'UNKNOWN') {
+                    candle.buyVolume += trade.quantity;
+                    if (isBigPlayer) {
+                        candle.bigPlayerBuyVolume += trade.quantity;
+                    }
+                } else if (trade.aggressor === 'SELL') {
+                    candle.sellVolume += trade.quantity;
+                    if (isBigPlayer) {
+                        candle.bigPlayerSellVolume += trade.quantity;
+                    }
+                }
+                
+                candle.volume = candle.buyVolume + candle.sellVolume;
+            });
+            
+            const ohlc = Array.from(ohlcMap.values()).sort((a, b) => a.x - b.x);
+
+            return { ohlc, bubbles };
+        }
+
+
+        // --- Charting Logic ---
+
+        function drawChart(ohlcData, bubbleData) {
+            const chartDom = document.getElementById('trading-chart');
+            
+            if (!tradingChart) {
+                tradingChart = echarts.init(chartDom, 'light', { renderer: 'canvas' });
+            }
+
+            // Check if there is any data to plot
+            const hasData = ohlcData.length > 0;
+
+            // Convert OHLC object array to ECharts format: [timestamp, open, close, low, high]
+            const ecOhlcData = hasData ? ohlcData.map(d => [d.x, d.open, d.close, d.low, d.high]) : [];
+
+            // Prepare data for the Four-Way Split Volume Bar Chart
+            const ecNormalBuyVolumeData = hasData ? ohlcData.map(d => ({
+                value: [d.x, d.buyVolume - d.bigPlayerBuyVolume],
+                itemStyle: { color: '#B8E0B8' } 
+            })) : [];
+            const ecBigPlayerBuyVolumeData = hasData ? ohlcData.map(d => ({
+                value: [d.x, d.bigPlayerBuyVolume],
+                itemStyle: { color: '#18C789' } 
+            })) : [];
+            const ecNormalSellVolumeData = hasData ? ohlcData.map(d => ({
+                value: [d.x, d.sellVolume - d.bigPlayerSellVolume],
+                itemStyle: { color: '#F7C9C9' } 
+            })) : [];
+            const ecBigPlayerSellVolumeData = hasData ? ohlcData.map(d => ({
+                value: [d.x, d.bigPlayerSellVolume],
+                itemStyle: { color: '#EA4A5A' } 
+            })) : [];
+
+            // Prepare Bubble Data
+            const allQuantities = rawTradeData.map(d => d.quantity);
+            const avgQ = allQuantities.length > 0 ? allQuantities.reduce((a, b) => a + b, 0) / allQuantities.length : 1;
+            
+            const maxImpactVisualization = 5.0; 
+            const minImpact = 1.0; 
+            const impactRange = maxImpactVisualization - minImpact; 
+
+            const ecBubbleData = hasData ? bubbleData.map(d => [
+                d.x, d.y, d.q, d.impactScore 
+            ]) : [];
+
+            function getSymbolSize(data) {
+                const rawQuantity = data[2]; 
+                const normalizedQ = rawQuantity / avgQ; 
+                return Math.max(8, Math.min(60, 15 * Math.log10(normalizedQ + 1))); 
+            }
+
+            function getColor(impactScore) {
+                let clampedScore = Math.min(maxImpactVisualization, Math.max(minImpact, impactScore));
+                let normalized = (clampedScore - minImpact) / impactRange;
+                const hue = 100 - (normalized * 100); 
+                return `hsl(${hue}, 80%, 45%)`; 
+            }
+            
+            // Set DataZoom property conditionally based on data presence
+            // Only enable zoom/pan if there is actual data
+            const dataZoomConfig = hasData ? [
+                {
+                    type: 'slider',
+                    xAxisIndex: [0, 1], 
+                    bottom: 25,
+                    height: 20,
+                    textStyle: { color: '#444' }
+                },
+                {
+                    type: 'inside',
+                    xAxisIndex: [0, 1] 
+                }
+            ] : [];
+
+            const option = {
+                title: {
+                    text: hasData ? `${currentSecurity} Candlestick Chart (${currentInterval})` : 'Awaiting Data',
+                    left: 'center',
+                    textStyle: { fontSize: 16 }
+                },
+                tooltip: {
+                    trigger: 'axis',
+                    axisPointer: { type: 'cross' },
+                    formatter: function (params) {
+                        let html = params[0].name + '<br/>';
+                        let totalBuyQ = 0;
+                        let totalSellQ = 0;
+                        let bigPlayerBuyQ = 0;
+                        let bigPlayerSellQ = 0;
+
+                        params.forEach(item => {
+                            if (item.seriesType === 'candlestick') {
+                                html += `<span style="display:inline-block;margin-right:4px;border-radius:10px;width:10px;height:10px;background-color:${item.color};"></span>
+                                    OHLC: O:${item.data[1].toFixed(2)} C:${item.data[2].toFixed(2)} L:${item.data[3].toFixed(2)} H:${item.data[4].toFixed(2)}<br/>`;
+                            } else if (item.seriesType === 'scatter') {
+                                const data = item.data;
+                                const impact = data[3]; 
+                                const totalQ = data[2].toFixed(0);
+                                const color = getColor(impact);
+
+                                html += `<span style="display:inline-block;margin-right:4px;border-radius:10px;width:10px;height:10px;background-color:${color};"></span>
+                                    <strong>Bubble:</strong> Price: ${data[1].toFixed(2)}<br/>`;
+                                html += `Total Volume (Q): <strong>${totalQ}</strong> (Size based on Total Q)<br/>`;
+                                html += `Impact Score: <strong style="color:${color};">${impact.toFixed(2)}</strong> (Max LTQ / Live Avg LTQ)`;
+                            } else if (item.seriesType === 'bar') {
+                                const q = item.data.value[1];
+                                if (item.seriesName === 'Normal Buy Q') {
+                                    totalBuyQ += q;
+                                } else if (item.seriesName === 'Big Player Buy Q') {
+                                    totalBuyQ += q;
+                                    bigPlayerBuyQ += q;
+                                } else if (item.seriesName === 'Normal Sell Q') {
+                                    totalSellQ += q;
+                                } else if (item.seriesName === 'Big Player Sell Q') {
+                                    totalSellQ += q;
+                                    bigPlayerSellQ += q;
+                                }
+                            }
+                        });
+                        
+                        if (totalBuyQ + totalSellQ > 0) {
+                            html += `<br/>--- Volume (Buy/Sell Aggressor) ---<br/>`;
+                            html += `Total Buy Q: <strong style="color:#18C789;">${totalBuyQ.toFixed(0)}</strong> (Big: ${bigPlayerBuyQ.toFixed(0)})<br/>`;
+                            html += `Total Sell Q: <strong style="color:#EA4A5A;">${totalSellQ.toFixed(0)}</strong> (Big: ${bigPlayerSellQ.toFixed(0)})<br/>`;
+                            html += `Total Q: <strong>${(totalBuyQ + totalSellQ).toFixed(0)}</strong><br/>`;
+                        }
+
+                        return html;
+                    }
+                },
+                legend: {
+                    data: ['Price (Candlestick)', 'High Impact Trades', 'Normal Buy Q', 'Big Player Buy Q', 'Normal Sell Q', 'Big Player Sell Q'],
+                    bottom: 0,
+                    padding: [0, 0, 5, 0]
+                },
+                axisPointer: {
+                    link: { xAxisIndex: 'all' } 
+                },
+                dataZoom: dataZoomConfig, // Dynamically set data zoom based on data presence
+                grid: [
+                    { // Grid 0: Candlestick/Scatter (Top Chart)
+                        left: '10%',
+                        right: '10%',
+                        top: '8%',
+                        height: '60%' 
+                    },
+                    { // Grid 1: Volume Bar (Bottom Chart)
+                        left: '10%',
+                        right: '10%',
+                        top: '75%', 
+                        height: '15%' 
+                    }
+                ],
+                xAxis: [
+                    { // XAxis 0: Top chart (Price)
+                        type: 'time',
+                        scale: true,
+                        axisLabel: { show: false }, 
+                        splitLine: { show: true, lineStyle: { color: 'rgba(0,0,0,0.05)' } },
+                        gridIndex: 0
+                    },
+                    { // XAxis 1: Bottom chart (Volume)
+                        type: 'time',
+                        scale: true,
+                        gridIndex: 1,
+                        axisLine: { onZero: false, lineStyle: { color: '#333' } },
+                        splitLine: { show: true, lineStyle: { color: 'rgba(0,0,0,0.05)' } },
+                    }
+                ],
+                yAxis: [
+                    { // YAxis 0: Top chart (Price)
+                        scale: true,
+                        axisLine: { lineStyle: { color: '#333' } },
+                        splitLine: { lineStyle: { color: 'rgba(0,0,0,0.1)' } },
+                        gridIndex: 0
+                    },
+                    { // YAxis 1: Bottom chart (Volume)
+                        name: 'Volume',
+                        scale: true,
+                        gridIndex: 1,
+                        axisLabel: { formatter: function (value) { return value > 1000 ? (value / 1000).toFixed(1) + 'k' : value; } },
+                        splitNumber: 2,
+                        axisLine: { lineStyle: { color: '#333' } },
+                        splitLine: { show: false } 
+                    }
+                ],
+                series: [
+                    // --- Price Series (Grid 0) ---
+                    {
+                        name: 'Price (Candlestick)',
+                        type: 'candlestick',
+                        xAxisIndex: 0,
+                        yAxisIndex: 0,
+                        data: ecOhlcData,
+                        itemStyle: {
+                            color: 'rgb(24, 199, 137)', 
+                            color0: 'rgb(234, 74, 90)', 
+                            borderColor: 'rgb(24, 199, 137)',
+                            borderColor0: 'rgb(234, 74, 90)'
+                        },
+                    },
+                    {
+                        name: `High Impact Trades`,
+                        type: 'scatter',
+                        xAxisIndex: 0,
+                        yAxisIndex: 0,
+                        data: ecBubbleData,
+                        symbolSize: getSymbolSize, 
+                        itemStyle: {
+                            color: function (params) {
+                                const impactScore = params.data[3]; 
+                                return getColor(impactScore); 
+                            },
+                            borderColor: 'rgba(0, 0, 0, 0.5)', 
+                            borderWidth: 1.5,
+                            opacity: 0.8
+                        },
+                        // Only show scatter tooltips when hovering over the scatter points
+                        tooltip: { trigger: 'item' } 
+                    },
+                    
+                    // --- Volume Series (Grid 1) - Four-way split by Aggressor Proxy ---
+                    {
+                        name: 'Normal Buy Q',
+                        type: 'bar',
+                        xAxisIndex: 1,
+                        yAxisIndex: 1,
+                        data: ecNormalBuyVolumeData,
+                        stack: 'TotalVolume',
+                        barMaxWidth: '80%',
+                        emphasis: { focus: 'series' },
+                    },
+                    {
+                        name: 'Big Player Buy Q',
+                        type: 'bar',
+                        xAxisIndex: 1,
+                        yAxisIndex: 1,
+                        data: ecBigPlayerBuyVolumeData,
+                        stack: 'TotalVolume',
+                        barMaxWidth: '80%',
+                        emphasis: { focus: 'series' },
+                    },
+                    {
+                        name: 'Normal Sell Q',
+                        type: 'bar',
+                        xAxisIndex: 1,
+                        yAxisIndex: 1,
+                        data: ecNormalSellVolumeData,
+                        stack: 'TotalVolume',
+                        barMaxWidth: '80%',
+                        emphasis: { focus: 'series' },
+                    },
+                    {
+                        name: 'Big Player Sell Q',
+                        type: 'bar',
+                        xAxisIndex: 1,
+                        yAxisIndex: 1,
+                        data: ecBigPlayerSellVolumeData,
+                        stack: 'TotalVolume',
+                        barMaxWidth: '80%',
+                        emphasis: { focus: 'series' },
+                    }
+                ]
+            };
+            
+            tradingChart.setOption(option, { notMerge: true });
+        }
+        
+        // --- Main Controller ---
+        
+        function handleAggregationChange() {
+            // Only re-run if we have data loaded
+            if (simulatedMessages.length > 0) {
+                const newInterval = document.getElementById('interval-input').value.toUpperCase();
+                const newThreshold = parseInt(document.getElementById('threshold-input').value);
+                const newBigPlayerThreshold = parseInt(document.getElementById('big-player-threshold-input').value); 
+
+                currentInterval = newInterval;
+                currentThreshold = newThreshold;
+                currentBigPlayerThreshold = newBigPlayerThreshold; 
+
+                // Re-run the pipeline to re-aggregate live ticks with new settings
+                startChartPipeline(); 
+                updateStatus('COMPLETE', `Aggregation settings updated and chart redrawn.`);
+            }
+        }
+
+        function handleSecurityChange() {
+             const newSecurity = document.getElementById('security-select').value;
+             // Only process if a security is selected and it's different
+             if (newSecurity !== currentSecurity) {
+                currentSecurity = newSecurity;
+                startChartPipeline(); 
+                console.log(`Security changed to: ${currentSecurity}. Restarting data processing.`);
+             }
+        }
+
+        function setupUI() {
+            currentBigPlayerThreshold = parseInt(document.getElementById('big-player-threshold-input').value);
+
+            document.getElementById('security-select').addEventListener('change', handleSecurityChange);
+            document.getElementById('interval-input').addEventListener('change', handleAggregationChange);
+            document.getElementById('threshold-input').addEventListener('change', handleAggregationChange);
+            document.getElementById('big-player-threshold-input').addEventListener('change', handleAggregationChange); 
+            document.getElementById('data-file-input').addEventListener('change', handleFileSelect);
+
+            window.addEventListener('resize', () => {
+                if (tradingChart) {
+                    tradingChart.resize();
+                }
+            });
+            
+            // Initial chart setup to show the "Awaiting File" message
+            drawChart([], []);
+        }
+
+        // --- Initialization ---
+        window.onload = () => {
+            setupUI();
+        };
+
+        // Boilerplate Firebase structure (not used in this example)
+        const __app_id = 'trading-file-app';
+        const __firebase_config = '{}'; 
+        const __initial_auth_token = undefined; 
+    </script>
+</body>
+</html>
